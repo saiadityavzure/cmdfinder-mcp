@@ -1,0 +1,6 @@
+fastmcp
+langchain-community
+langchain-text-splitters
+beautifulsoup4
+requests
+python-dotenv

@@ -1,0 +1,7 @@
+{
+  "mcpServers": {
+    "cmdfinder-mcp": {
+      "url": "http://localhost:9008/sse"
+    }
+  }
+}

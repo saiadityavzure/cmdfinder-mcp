@@ -1,6 +1,9 @@
 fastmcp
-langchain-community
-langchain-text-splitters
+faiss-cpu
+sentence-transformers
+numpy
 beautifulsoup4
 requests
 python-dotenv
+httpx
+openai

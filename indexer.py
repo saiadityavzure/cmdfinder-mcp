@@ -179,12 +179,32 @@ def _command_bonus(chunk: str) -> float:
     bonus = 0.0
     if re.search(r"(?m)^\s*show\s+[a-z0-9-]+", lowered):
         bonus += 0.08
-    if "show bgp" in lowered:
-        bonus += 0.1
-    if "neighbor" in lowered or "neigh" in lowered:
-        bonus += 0.05
-    if "uptime" in lowered:
-        bonus += 0.03
+    return bonus
+
+
+def _intent_alignment_bonus(query: str, chunk: str) -> float:
+    """Boost chunks whose command family matches the query intent."""
+    q = query.lower()
+    c = chunk.lower()
+    bonus = 0.0
+
+    # Route-table intent
+    if any(term in q for term in ("route", "routing", "rib")):
+        if any(term in c for term in ("show ip route", "show ipv6 route", "routing table")):
+            bonus += 0.14
+        if "show bgp" in c:
+            bonus -= 0.05
+
+    # BGP-neighbor intent
+    if any(term in q for term in ("bgp", "neighbor", "as-path")):
+        if any(term in c for term in ("show bgp", "neighbors")):
+            bonus += 0.12
+
+    # Interface intent
+    if any(term in q for term in ("interface", "port", "link")):
+        if any(term in c for term in ("show interface", "show interfaces")):
+            bonus += 0.12
+
     return bonus
 
 
@@ -337,7 +357,13 @@ def search(query: str, k: int | None = None) -> list[dict]:
             chunk = _chunks[idx]
             semantic = float(score)
             lexical = _lexical_score(query, chunk)
-            hybrid = (semantic * 0.75) + (lexical * 0.25) + _command_bonus(chunk) - _noise_penalty(chunk)
+            hybrid = (
+                (semantic * 0.7)
+                + (lexical * 0.3)
+                + _command_bonus(chunk)
+                + _intent_alignment_bonus(query, chunk)
+                - _noise_penalty(chunk)
+            )
             results.append({
                 "text":  chunk,
                 "score": round(max(0.0, hybrid), 4),

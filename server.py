@@ -94,6 +94,10 @@ def _extract_command_candidates(results: list[dict]) -> list[str]:
                 continue
             if lowered.count("show ") > 1:
                 continue
+            if any(ch in line for ch in "[]{}<>"):
+                continue
+            if " | " in line:
+                continue
             if re.search(r"[^a-z0-9\s_\-./:<>{}\[\]()|]", lowered):
                 continue
 
@@ -105,6 +109,18 @@ def _extract_command_candidates(results: list[dict]) -> list[str]:
             if len(candidates) >= 8:
                 return candidates
     return candidates
+
+
+def _intent_fallback_commands(query: str) -> list[str]:
+    """Return fast fallback commands for high-confidence intents."""
+    q = query.lower()
+    if any(term in q for term in ("route", "routing", "rib")):
+        if "default" in q and "vrf" in q:
+            return ["show ip route vrf default", "show ipv6 route vrf default"]
+        if "vrf" in q:
+            return ["show ip route vrf default"]
+        return ["show ip route", "show ipv6 route"]
+    return []
 
 # ── Load or build FAISS index at startup ──────────────────────────────────────
 print(f"\n{'='*50}")
@@ -131,9 +147,9 @@ mcp = FastMCP(
     instructions=(
         "cmdfinder-mcp is a semantic CLI command finder for Cisco NX-OS documentation. "
         "\n\n"
-        "When find_command returns, prioritize 'top_command' and then 'command_candidates'. "
-        "These are cleaned command syntaxes extracted from the indexed documentation. "
-        "Prefer returning the exact command with minimal extra explanation. "
+        "When find_command returns, use only 'suggested_command'. "
+        "The tool is optimized to return one exact command for the user query. "
+        "Do not expand with related command lists unless explicitly asked. "
         "\n\n"
         "Use get_index_info to confirm which documentation is indexed and which "
         "embedding model is in use. "
@@ -154,17 +170,25 @@ async def find_command(query: str, top_k: int = settings.faiss_top_k) -> dict:
         top_k:  Number of result chunks to return (default from config).
     """
     results = search(query, k=top_k)
-    command_candidates = _extract_command_candidates(results)
+    extracted_candidates = _extract_command_candidates(results)
+    merged_candidates = _intent_fallback_commands(query) + extracted_candidates
+
+    command_candidates: list[str] = []
+    seen: set[str] = set()
+    for cmd in merged_candidates:
+        key = cmd.lower().strip()
+        if key in seen:
+            continue
+        seen.add(key)
+        command_candidates.append(cmd)
+        if len(command_candidates) >= 3:
+            break
+
+    suggested_command = command_candidates[0] if command_candidates else None
     response = {
         "query": query,
-        "source": settings.docs_url,
-        "top_k": top_k,
-        "top_command": command_candidates[0] if command_candidates else None,
-        "command_candidates": command_candidates[:3],
-        "result_summary": {
-            "retrieved_chunks": len(results),
-            "best_score": results[0]["score"] if results else None,
-        },
+        "suggested_command": suggested_command,
+        "status": "ok" if suggested_command else "no_match",
     }
     _log_tool_response("find_command", response)
     return response

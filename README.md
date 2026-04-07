@@ -120,7 +120,7 @@ docker compose up -d
 This will:
 - Build the image if not already built
 - Start the container with port `9008` exposed
-- Mount the `faiss_index` volume so the index persists across restarts
+- Bind-mount `./faiss_index` and `./logs` so index and tool logs are visible on host and in container
 - Auto-restart the container unless manually stopped
 
 ### Useful Docker Compose commands

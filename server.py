@@ -18,7 +18,11 @@ Usage:
     → SSE URL: http://0.0.0.0:9008/sse
 """
 
+import json
+import logging
 import os
+import re
+from pathlib import Path
 from dotenv import load_dotenv
 
 load_dotenv()
@@ -29,6 +33,65 @@ settings.validate()
 
 from indexer import build_index, load_index, index_exists, search, get_index_meta
 from fastmcp import FastMCP
+
+
+def _build_tool_logger() -> logging.Logger:
+    """Create a dedicated logger for MCP tool responses."""
+    logger = logging.getLogger("cmdfinder_mcp.tools")
+    if logger.handlers:
+        return logger
+
+    log_dir = Path("logs")
+    log_dir.mkdir(parents=True, exist_ok=True)
+    log_file = log_dir / "tool_responses.log"
+
+    logger.setLevel(logging.INFO)
+    logger.propagate = False
+
+    file_handler = logging.FileHandler(log_file, encoding="utf-8")
+    file_handler.setFormatter(
+        logging.Formatter("%(asctime)s | %(levelname)s | %(message)s")
+    )
+    logger.addHandler(file_handler)
+    return logger
+
+
+TOOL_LOGGER = _build_tool_logger()
+MAX_LOG_CHARS = 12000
+
+
+def _log_tool_response(tool_name: str, response: dict) -> None:
+    """Log tool responses as JSON with bounded size."""
+    serialized = json.dumps(response, ensure_ascii=True, default=str)
+    if len(serialized) > MAX_LOG_CHARS:
+        serialized = serialized[:MAX_LOG_CHARS] + "...<truncated>"
+    TOOL_LOGGER.info("tool=%s response=%s", tool_name, serialized)
+
+
+def _extract_command_candidates(results: list[dict]) -> list[str]:
+    """Extract likely NX-OS command lines from top search chunks."""
+    candidates: list[str] = []
+    seen: set[str] = set()
+    patterns = [
+        r"(?im)^\s*(show\s+[a-z0-9][a-z0-9\s\-./:()]{2,120})$",
+        r"(?im)\b(show\s+bgp\s+neighbors?(?:\s+\S+)*)",
+    ]
+
+    for item in results:
+        text = str(item.get("text", ""))
+        for pat in patterns:
+            for match in re.findall(pat, text):
+                cmd = " ".join(match.strip().split())
+                lowered = cmd.lower()
+                if lowered in seen:
+                    continue
+                if len(cmd) < 6 or len(cmd) > 150:
+                    continue
+                seen.add(lowered)
+                candidates.append(cmd)
+                if len(candidates) >= 10:
+                    return candidates
+    return candidates
 
 # ── Load or build FAISS index at startup ──────────────────────────────────────
 print(f"\n{'='*50}")
@@ -81,12 +144,15 @@ async def find_command(query: str, top_k: int = settings.faiss_top_k) -> dict:
         top_k:  Number of result chunks to return (default from config).
     """
     results = search(query, k=top_k)
-    return {
+    response = {
         "query":   query,
         "source":  settings.docs_url,
         "top_k":   top_k,
         "results": results,   # list of {"text": ..., "score": ...}
+        "command_candidates": _extract_command_candidates(results),
     }
+    _log_tool_response("find_command", response)
+    return response
 
 
 @mcp.tool()
@@ -97,7 +163,7 @@ async def get_index_info() -> dict:
     embedding model and LLM provider are configured.
     """
     meta = get_index_meta()
-    return {
+    response = {
         "index_built":        index_exists(),
         "docs_url":           settings.docs_url,
         "embedding_provider": settings.embedding_provider,
@@ -110,6 +176,8 @@ async def get_index_info() -> dict:
         "chunk_overlap":      settings.chunk_overlap,
         "top_k_default":      settings.faiss_top_k,
     }
+    _log_tool_response("get_index_info", response)
+    return response
 
 
 @mcp.tool()
@@ -119,7 +187,7 @@ async def refresh_index() -> dict:
     This allows picking up documentation updates without restarting the server.
     Not yet implemented.
     """
-    return {
+    response = {
         "status": "not_implemented",
         "message": (
             "refresh_index is planned but not yet implemented. "
@@ -127,6 +195,8 @@ async def refresh_index() -> dict:
             f"({settings.faiss_index_dir}) and restart the server."
         ),
     }
+    _log_tool_response("refresh_index", response)
+    return response
 
 
 # ─────────────────────────────────────────────────────────────────────────────

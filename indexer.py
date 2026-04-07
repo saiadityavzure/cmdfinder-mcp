@@ -12,6 +12,7 @@ provider/model changes that require a full rebuild.
 
 import os
 import json
+import re
 import numpy as np
 import faiss
 
@@ -24,6 +25,24 @@ _METADATA_FILE = lambda: os.path.join(settings.faiss_index_dir, "metadata.json")
 # ── In-memory state (populated by load_index or build_index) ──────────────────
 _index:  faiss.Index | None = None
 _chunks: list[str] = []
+
+_STOPWORDS = {
+    "a", "an", "and", "are", "as", "at", "be", "by", "for", "from", "how",
+    "in", "is", "it", "of", "on", "or", "that", "the", "to", "what", "when",
+    "where", "which", "with", "show", "all",
+}
+
+_NOISE_PATTERNS = [
+    "skip to content",
+    "skip to search",
+    "skip to footer",
+    "bias-free language",
+    "was this document helpful",
+    "open a support case",
+    "book table of contents",
+    "download options",
+    "available languages",
+]
 
 
 # ─────────────────────────────────────────────────────────────────────────────
@@ -59,7 +78,59 @@ def _recursive_split(text: str, size: int, overlap: int) -> list[str]:
     separators = ["\n\n", "\n", " ", ""]
     chunks = []
     _split(text, size, overlap, separators, chunks)
-    return [c.strip() for c in chunks if c.strip()]
+    return [c.strip() for c in chunks if c.strip() and not _is_noisy_chunk(c)]
+
+
+def _is_noisy_chunk(chunk: str) -> bool:
+    """Drop chunks dominated by site chrome/navigation text."""
+    lowered = chunk.lower()
+    noise_hits = sum(1 for p in _NOISE_PATTERNS if p in lowered)
+    if noise_hits >= 2:
+        return True
+    lines = [ln.strip() for ln in chunk.splitlines() if ln.strip()]
+    if len(lines) < 4:
+        return False
+    short_lines = sum(1 for ln in lines if len(ln) <= 18)
+    if short_lines / len(lines) > 0.7:
+        return True
+    return False
+
+
+def _query_terms(query: str) -> set[str]:
+    return {
+        t for t in re.findall(r"[a-zA-Z0-9_-]+", query.lower())
+        if len(t) > 2 and t not in _STOPWORDS
+    }
+
+
+def _lexical_score(query: str, chunk: str) -> float:
+    terms = _query_terms(query)
+    if not terms:
+        return 0.0
+    lowered = chunk.lower()
+    matches = sum(1 for term in terms if term in lowered)
+    return matches / len(terms)
+
+
+def _command_bonus(chunk: str) -> float:
+    """Boost chunks that appear to contain concrete NX-OS CLI syntax."""
+    lowered = chunk.lower()
+    bonus = 0.0
+    if re.search(r"(?m)^\s*show\s+[a-z0-9-]+", lowered):
+        bonus += 0.08
+    if "show bgp" in lowered:
+        bonus += 0.1
+    if "neighbor" in lowered or "neigh" in lowered:
+        bonus += 0.05
+    if "uptime" in lowered:
+        bonus += 0.03
+    return bonus
+
+
+def _noise_penalty(chunk: str) -> float:
+    lowered = chunk.lower()
+    hits = sum(1 for p in _NOISE_PATTERNS if p in lowered)
+    return min(0.2, hits * 0.04)
 
 
 def _split(text: str, size: int, overlap: int, separators: list[str], out: list[str]):
@@ -191,16 +262,23 @@ def search(query: str, k: int | None = None) -> list[dict]:
         raise RuntimeError("Index is not loaded. Call load_index() or build_index() first.")
 
     k = k or settings.faiss_top_k
+    # Oversample, then rerank so final top-k are more command-bearing.
+    candidate_k = min(len(_chunks), max(k * 4, 12))
     query_vec = embed_one(query).reshape(1, -1).astype(np.float32)
     faiss.normalize_L2(query_vec)
 
-    distances, indices = _index.search(query_vec, k)
+    distances, indices = _index.search(query_vec, candidate_k)
 
     results = []
     for score, idx in zip(distances[0], indices[0]):
         if idx >= 0:
+            chunk = _chunks[idx]
+            semantic = float(score)
+            lexical = _lexical_score(query, chunk)
+            hybrid = (semantic * 0.75) + (lexical * 0.25) + _command_bonus(chunk) - _noise_penalty(chunk)
             results.append({
-                "text":  _chunks[idx],
-                "score": round(float(score), 4),
+                "text":  chunk,
+                "score": round(max(0.0, hybrid), 4),
             })
-    return results
+    results.sort(key=lambda r: r["score"], reverse=True)
+    return results[:k]

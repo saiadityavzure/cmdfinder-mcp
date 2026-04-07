@@ -72,25 +72,38 @@ def _extract_command_candidates(results: list[dict]) -> list[str]:
     """Extract likely NX-OS command lines from top search chunks."""
     candidates: list[str] = []
     seen: set[str] = set()
-    patterns = [
-        r"(?im)^\s*(show\s+[a-z0-9][a-z0-9\s\-./:()]{2,120})$",
-        r"(?im)\b(show\s+bgp\s+neighbors?(?:\s+\S+)*)",
+    invalid_fragments = [
+        "show running system information",
+        "syntax description",
+        "(optional)",
+        "display ",
+        "command mode",
     ]
 
     for item in results:
         text = str(item.get("text", ""))
-        for pat in patterns:
-            for match in re.findall(pat, text):
-                cmd = " ".join(match.strip().split())
-                lowered = cmd.lower()
-                if lowered in seen:
-                    continue
-                if len(cmd) < 6 or len(cmd) > 150:
-                    continue
-                seen.add(lowered)
-                candidates.append(cmd)
-                if len(candidates) >= 10:
-                    return candidates
+        for raw_line in text.splitlines():
+            line = " ".join(raw_line.strip().split())
+            lowered = line.lower()
+
+            if not lowered.startswith("show "):
+                continue
+            if len(line) < 6 or len(line) > 140:
+                continue
+            if any(fragment in lowered for fragment in invalid_fragments):
+                continue
+            if lowered.count("show ") > 1:
+                continue
+            if re.search(r"[^a-z0-9\s_\-./:<>{}\[\]()|]", lowered):
+                continue
+
+            if lowered in seen:
+                continue
+            seen.add(lowered)
+            candidates.append(line)
+
+            if len(candidates) >= 8:
+                return candidates
     return candidates
 
 # ── Load or build FAISS index at startup ──────────────────────────────────────
@@ -118,12 +131,9 @@ mcp = FastMCP(
     instructions=(
         "cmdfinder-mcp is a semantic CLI command finder for Cisco NX-OS documentation. "
         "\n\n"
-        "When find_command returns results, examine the 'results' array. Each entry has "
-        "'text' (the raw documentation chunk) and 'score' (cosine similarity, 0-1). "
-        "From the highest-scoring chunks, extract and present: "
-        "(1) the exact command syntax, "
-        "(2) what the command displays or does, "
-        "(3) any important optional parameters or variants. "
+        "When find_command returns, prioritize 'top_command' and then 'command_candidates'. "
+        "These are cleaned command syntaxes extracted from the indexed documentation. "
+        "Prefer returning the exact command with minimal extra explanation. "
         "\n\n"
         "Use get_index_info to confirm which documentation is indexed and which "
         "embedding model is in use. "
@@ -144,12 +154,17 @@ async def find_command(query: str, top_k: int = settings.faiss_top_k) -> dict:
         top_k:  Number of result chunks to return (default from config).
     """
     results = search(query, k=top_k)
+    command_candidates = _extract_command_candidates(results)
     response = {
-        "query":   query,
-        "source":  settings.docs_url,
-        "top_k":   top_k,
-        "results": results,   # list of {"text": ..., "score": ...}
-        "command_candidates": _extract_command_candidates(results),
+        "query": query,
+        "source": settings.docs_url,
+        "top_k": top_k,
+        "top_command": command_candidates[0] if command_candidates else None,
+        "command_candidates": command_candidates[:3],
+        "result_summary": {
+            "retrieved_chunks": len(results),
+            "best_score": results[0]["score"] if results else None,
+        },
     }
     _log_tool_response("find_command", response)
     return response

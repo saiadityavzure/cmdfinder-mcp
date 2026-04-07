@@ -16,6 +16,9 @@ load_dotenv()
 class Settings:
     # ── Documentation ──────────────────────────────────────────────────────────
     docs_url: str = field(default_factory=lambda: os.getenv("DOCS_URL", ""))
+    docs_max_pages: int = field(
+        default_factory=lambda: int(os.getenv("DOCS_MAX_PAGES", "120"))
+    )
 
     # ── Embedding ──────────────────────────────────────────────────────────────
     # Providers: sentence_transformers | openai | ollama
@@ -86,6 +89,8 @@ class Settings:
         """Raise ValueError for any missing required configuration."""
         if not self.docs_url:
             raise ValueError("DOCS_URL is required in .env")
+        if self.docs_max_pages < 1:
+            raise ValueError("DOCS_MAX_PAGES must be >= 1")
 
         if self.embedding_provider == "openai" and not self.openai_api_key:
             raise ValueError(

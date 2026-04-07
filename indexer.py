@@ -13,6 +13,7 @@ provider/model changes that require a full rebuild.
 import os
 import json
 import re
+from urllib.parse import urljoin, urlparse
 import numpy as np
 import faiss
 
@@ -54,23 +55,83 @@ def index_exists() -> bool:
 
 
 def _scrape_and_chunk(url: str) -> list[str]:
-    """Scrape URL with BeautifulSoup and split into overlapping text chunks."""
+    """Scrape seed URL and linked show-command pages, then split into chunks."""
     import requests
     from bs4 import BeautifulSoup
 
     headers = {"User-Agent": settings.user_agent}
-    print(f"[indexer] Fetching: {url}")
-    resp = requests.get(url, headers=headers, timeout=60)
-    resp.raise_for_status()
+    page_texts = _crawl_docs(url, headers=headers, max_pages=settings.docs_max_pages)
+    combined_text = "\n\n".join(page_texts)
+    return _recursive_split(combined_text, settings.chunk_size, settings.chunk_overlap)
 
-    soup = BeautifulSoup(resp.text, "html.parser")
-    # Remove nav/header/footer noise
-    for tag in soup(["nav", "header", "footer", "script", "style"]):
+
+def _clean_html_text(html: str) -> str:
+    from bs4 import BeautifulSoup
+
+    soup = BeautifulSoup(html, "html.parser")
+    for tag in soup(["nav", "header", "footer", "script", "style", "noscript"]):
         tag.decompose()
-    text = soup.get_text(separator="\n", strip=True)
+    return soup.get_text(separator="\n", strip=True)
 
-    # Recursive character splitter (inline — no LangChain needed)
-    return _recursive_split(text, settings.chunk_size, settings.chunk_overlap)
+
+def _normalize_url(raw_url: str) -> str:
+    no_fragment = raw_url.split("#", 1)[0]
+    no_query = no_fragment.split("?", 1)[0]
+    return no_query.strip()
+
+
+def _is_relevant_show_doc(seed_url: str, candidate_url: str) -> bool:
+    seed = urlparse(seed_url)
+    cand = urlparse(candidate_url)
+    if cand.scheme not in ("http", "https"):
+        return False
+    if cand.netloc != seed.netloc:
+        return False
+    if "/command-reference/show/" not in cand.path:
+        return False
+    if not cand.path.endswith(".html"):
+        return False
+    return True
+
+
+def _crawl_docs(seed_url: str, headers: dict, max_pages: int) -> list[str]:
+    import requests
+    from bs4 import BeautifulSoup
+
+    visited: set[str] = set()
+    queue: list[str] = [_normalize_url(seed_url)]
+    texts: list[str] = []
+
+    while queue and len(visited) < max_pages:
+        current = queue.pop(0)
+        if current in visited:
+            continue
+
+        print(f"[indexer] Fetching: {current}")
+        try:
+            resp = requests.get(current, headers=headers, timeout=60)
+            resp.raise_for_status()
+        except Exception as exc:
+            print(f"[indexer] WARNING: Failed to fetch {current}: {exc}")
+            visited.add(current)
+            continue
+
+        visited.add(current)
+        html = resp.text
+        text = _clean_html_text(html)
+        if text.strip():
+            texts.append(f"SOURCE_URL: {current}\n{text}")
+
+        soup = BeautifulSoup(html, "html.parser")
+        for a in soup.find_all("a", href=True):
+            absolute = _normalize_url(urljoin(current, a["href"]))
+            if absolute in visited or absolute in queue:
+                continue
+            if _is_relevant_show_doc(seed_url, absolute):
+                queue.append(absolute)
+
+    print(f"[indexer] Crawled pages: {len(visited)}")
+    return texts
 
 
 def _recursive_split(text: str, size: int, overlap: int) -> list[str]:
@@ -189,6 +250,7 @@ def build_index() -> int:
     with open(_METADATA_FILE(), "w") as f:
         json.dump({
             "docs_url":           settings.docs_url,
+            "docs_max_pages":     settings.docs_max_pages,
             "embedding_provider": settings.embedding_provider,
             "embedding_model":    settings.embedding_model,
             "dim":                dim,

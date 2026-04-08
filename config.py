@@ -62,6 +62,11 @@ class Settings:
         default_factory=lambda: os.getenv("OLLAMA_LLM_MODEL", "llama3.2")
     )
 
+    # ── Command Registry ───────────────────────────────────────────────────────
+    command_registry_dir: str = field(
+        default_factory=lambda: os.getenv("COMMAND_REGISTRY_DIR", "command_registry")
+    )
+
     # ── FAISS ──────────────────────────────────────────────────────────────────
     faiss_index_dir: str = field(
         default_factory=lambda: os.getenv("FAISS_INDEX_DIR", "faiss_index")

@@ -11,10 +11,12 @@ RUN apt-get update && apt-get install -y --no-install-recommends \
 COPY requirements.txt .
 RUN pip install --no-cache-dir -r requirements.txt
 
-COPY config.py embedder.py indexer.py server.py ./
+COPY config.py embedder.py indexer.py server.py registry_builder.py build_registry.py ./
 
-# faiss_index will be mounted or auto-built on first run
+# faiss_index is mounted or auto-built on first run
+# command_registry is mounted so registry edits on the host are visible in-container
 VOLUME ["/app/faiss_index"]
+VOLUME ["/app/command_registry"]
 
 EXPOSE 9008
 

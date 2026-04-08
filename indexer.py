@@ -19,6 +19,11 @@ import faiss
 
 from config import settings
 from embedder import embed, embed_one
+from registry_builder import (
+    registry_exists,
+    load_registry,
+    chunks_from_registry,
+)
 
 _INDEX_FILE    = lambda: os.path.join(settings.faiss_index_dir, "index.faiss")
 _METADATA_FILE = lambda: os.path.join(settings.faiss_index_dir, "metadata.json")
@@ -245,14 +250,28 @@ def _split(text: str, size: int, overlap: int, separators: list[str], out: list[
 
 def build_index() -> int:
     """
-    Scrape DOCS_URL, embed chunks, build FAISS index, persist to disk.
+    Build FAISS index from the command registry (preferred) or by scraping
+    DOCS_URL directly (fallback when no registry exists).
+
+    Registry path  → run build_registry.py first, then this.
+    Fallback path  → scrape + raw-chunk (original behaviour).
+
     Returns the number of chunks indexed.
     """
     global _index, _chunks
 
-    chunks = _scrape_and_chunk(settings.docs_url)
+    if registry_exists():
+        print("[indexer] Command registry found — building chunks from registry.")
+        entries = load_registry()
+        chunks = chunks_from_registry(entries)
+        print(f"[indexer] {len(chunks)} chunks from {len(entries)} registry entries.")
+    else:
+        print("[indexer] No command registry found — falling back to raw scrape+chunk.")
+        print("[indexer] Tip: run `python build_registry.py` first for better control.")
+        chunks = _scrape_and_chunk(settings.docs_url)
+
     if not chunks:
-        raise RuntimeError("No content extracted from DOCS_URL")
+        raise RuntimeError("No content extracted — check DOCS_URL or command_registry")
 
     print(f"[indexer] Embedding {len(chunks)} chunks with "
           f"{settings.embedding_provider}/{settings.embedding_model} ...")

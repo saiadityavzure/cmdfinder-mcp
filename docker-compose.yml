@@ -10,6 +10,7 @@ services:
       - .env
     volumes:
       - ./faiss_index:/app/faiss_index
+      - ./command_registry:/app/command_registry
       - ./logs:/app/logs
     restart: unless-stopped
     healthcheck:

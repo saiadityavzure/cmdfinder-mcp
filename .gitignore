@@ -4,3 +4,5 @@ __pycache__/
 *.pyc
 *.pyo
 logs/
+# command_registry/ is intentionally NOT ignored — it's the configurable
+# intermediate layer between docs and the FAISS index. Commit it.
